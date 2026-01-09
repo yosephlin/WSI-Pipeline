@@ -71,10 +71,12 @@ class _WsiDicomAsOpenSlide:
     """Minimal OpenSlide-like wrapper around wsidicom, using level-0 coordinates."""
     def __init__(self, wsi):
         self._wsi = wsi
-        self.level_dimensions = [tuple(map(int, d)) for d in wsi.levels.level_dimensions]  # [(W,H),...]
-        # approximate downsamples from level 0
-        w0, h0 = self.level_dimensions[0]
-        self.level_downsamples = [w0 / w for (w, h) in self.level_dimensions]
+        self.level_dimensions = [
+            (int(l.datasets[0].TotalPixelMatrixColumns), int(l.datasets[0].TotalPixelMatrixRows))
+            for l in wsi.levels
+        ]
+        # wsidicom levels expose pyramid index as `level.level` (downsample = 2**level.level)
+        self.level_downsamples = [float(2 ** int(l.level)) for l in wsi.levels]
         self.properties = {}  # optionally populate if you want
 
     def read_region(self, location, level, size):
