@@ -184,6 +184,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Pipeline stage runner (preprocess -> sample -> train).")
     parser.add_argument("--stage", choices=["preprocess", "sample", "train", "all"], default="all")
     parser.add_argument("--slides-root", type=str, default=str(REPO_ROOT / "data"))
+    parser.add_argument("--manifest", type=str, default=None, help="Parquet manifest with SeriesInstanceUID etc.")
+    parser.add_argument("--tmp-root", type=str, default="/tmp/idc_wsi", help="Temp download root")
     parser.add_argument("--preprocess-root", type=str, default=str(REPO_ROOT / "output"))
     parser.add_argument("--output-root", type=str, default=None)
     parser.add_argument("--batch-size", type=int, default=2)
@@ -233,14 +235,44 @@ def main() -> None:
         preprocess_kwargs = json.loads(args.preprocess_kwargs)
 
     if args.stage in ("preprocess", "all"):
-        preprocess_stage(
-            slides_root,
-            output_root,
-            batch_size=int(args.batch_size),
-            num_workers=int(args.num_workers),
-            device=str(args.device),
-            preprocess_kwargs=preprocess_kwargs,
-        )
+        if args.manifest:
+            import pandas as pd
+            from pipeline.preprocess_qc import preprocess_wsi
+            from pipeline.idc_materialize import materialize_series_to_tmp
+
+            df = pd.read_parquet(args.manifest)
+            out_root = output_root
+            tmp_root = Path(args.tmp_root)
+
+            for r in df.itertuples(index=False):
+                series_uid = getattr(r, "SeriesInstanceUID")
+                slide_id = series_uid  # stable ID
+                out_dir = out_root / f"{slide_id}_qc"
+
+                if (out_dir / "preprocess_meta.json").exists():
+                    continue
+
+                extra_metadata: Dict[str, Any] = {"SeriesInstanceUID": str(series_uid)}
+                for key in ("series_aws_url", "collection_id", "PatientID"):
+                    if hasattr(r, key):
+                        value = getattr(r, key)
+                        if not pd.isna(value):
+                            extra_metadata[key] = value
+
+                with materialize_series_to_tmp(series_uid, tmp_root) as series_path:
+                    # series_path is a directory; preprocess_qc now supports it
+                    preprocess_wsi(
+                        series_path,
+                        output_dir=out_dir,
+                        target_mag=20.0,
+                        min_tissue_frac=0.5,
+                        device=str(args.device),
+                        extra_metadata=extra_metadata,
+                    )
+            print("[preprocess] done (manifest mode)")
+        else:
+            preprocess_stage(...)
+
 
     if args.stage in ("sample", "all"):
         sample_stage(

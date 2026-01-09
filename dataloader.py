@@ -39,11 +39,21 @@ def _discover_slide_paths(root: Path, exts: Sequence[str]) -> List[Path]:
     if not root.exists():
         return []
     exts_lower = {e.lower() for e in exts}
+
     slides: List[Path] = []
+
+    # Normal WSI files
     for path in root.rglob("*"):
-        if path.is_file() and path.suffix.lower() in exts_lower:
+        if path.is_file() and path.suffix.lower() in exts_lower and path.suffix.lower() != ".dcm":
             slides.append(path)
-    return sorted(slides)
+
+    # DICOM WSI: treat each series directory containing .dcm files as one "slide"
+    if ".dcm" in exts_lower:
+        dicom_files = list(root.rglob("*.dcm"))
+        series_dirs = sorted({p.parent for p in dicom_files})
+        slides.extend(series_dirs)
+
+    return sorted(set(slides))
 
 
 def _default_preprocess_dir(slide_path: Path, output_root: Optional[Path]) -> Path:

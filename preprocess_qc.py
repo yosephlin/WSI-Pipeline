@@ -56,6 +56,37 @@ GRANDQC_MPP = 1.5
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
+def _open_wsi(path: Path):
+    # OpenSlide for classic formats; WsiDicom for DICOM WSI folders
+    if path.is_dir() or path.suffix.lower() == ".dcm":
+        from wsidicom import WsiDicom
+        w = WsiDicom.open(path if path.is_dir() else path.parent)
+        return _WsiDicomAsOpenSlide(w)
+    else:
+        import openslide
+        return openslide.OpenSlide(str(path))
+
+
+class _WsiDicomAsOpenSlide:
+    """Minimal OpenSlide-like wrapper around wsidicom, using level-0 coordinates."""
+    def __init__(self, wsi):
+        self._wsi = wsi
+        self.level_dimensions = [tuple(map(int, d)) for d in wsi.levels.level_dimensions]  # [(W,H),...]
+        # approximate downsamples from level 0
+        w0, h0 = self.level_dimensions[0]
+        self.level_downsamples = [w0 / w for (w, h) in self.level_dimensions]
+        self.properties = {}  # optionally populate if you want
+
+    def read_region(self, location, level, size):
+        x0, y0 = location  # OpenSlide style: level-0 coords
+        ds = float(self.level_downsamples[level])
+        # wsidicom expects coords relative to the chosen level
+        xl, yl = int(round(x0 / ds)), int(round(y0 / ds))
+        img = self._wsi.read_region((xl, yl), level, size)
+        return img  # PIL.Image
+
+    def close(self):
+        self._wsi.close()
 
 DEFAULT_GRANDQC_MODEL = _repo_root() / "pipeline" / "models" / "GrandQC_MPP15.pth"
 
@@ -584,6 +615,7 @@ def preprocess_wsi(
     grandqc_batch_size: int = GRANDQC_BATCH_SIZE,
     device: str = "cuda",
     progress_callback: Optional[Callable[[str, int, int], None]] = None,
+    extra_metadata: Optional[Dict[str, Any]] = None,
 ) -> PreprocessResult:
     """
     Unified WSI preprocessing pipeline.
@@ -606,6 +638,7 @@ def preprocess_wsi(
         grandqc_batch_size: Batch size for GrandQC inference
         device: Device for GrandQC ("cuda" or "cpu")
         progress_callback: Optional callback(stage, current, total) for progress
+        extra_metadata: Optional dict merged into preprocess_meta.json
 
     Returns:
         PreprocessResult with all computed data and paths
@@ -634,7 +667,7 @@ def preprocess_wsi(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    slide = openslide.OpenSlide(str(wsi_path))
+    slide = _open_wsi(wsi_path)
     slide_id = wsi_path.stem
 
     def _progress(stage: str, current: int, total: int):
@@ -740,6 +773,10 @@ def preprocess_wsi(
         "zarr_path": str(zarr_path) if zarr_path else None,
         "parquet_path": str(parquet_path),
     }
+    if extra_metadata:
+        for key, value in extra_metadata.items():
+            if key not in metadata:
+                metadata[key] = value
 
     # Save metadata JSON
     meta_path = output_dir / "preprocess_meta.json"
