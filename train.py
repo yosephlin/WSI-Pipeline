@@ -11,8 +11,8 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from pipeline.roi_sampler import ROICandidate, pick_roi_pair, sample_candidate_rois_selective
-from pipeline.slide_vit import SlideViT, SlideViTConfig
+from roi_sampler import ROICandidate, pick_roi_pair, sample_candidate_rois_selective
+from slide_vit import SlideViT, SlideViTConfig
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
