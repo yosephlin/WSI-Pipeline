@@ -68,24 +68,89 @@ def _open_wsi(path: Path):
 
 
 class _WsiDicomAsOpenSlide:
-    """Minimal OpenSlide-like wrapper around wsidicom, using level-0 coordinates."""
+    """Minimal OpenSlide-like wrapper around wsidicom, using level-0 coordinates.
+
+    Key differences (WsiDicom vs OpenSlide) must be bridged:
+      - WsiDicom `level` in read_region is the *pyramid index*, not the available-level list index.
+      - WsiDicom `location` is relative to the specified level; OpenSlide is relative to base level.
+    """
+
     def __init__(self, wsi):
         self._wsi = wsi
+
+        # Cache available levels (OpenSlide-style indexing over *available* levels)
+        self._levels = list(wsi.levels)
+        self._pyr_levels = [int(getattr(l, "level", i)) for i, l in enumerate(self._levels)]
+
+        # (W, H)
         self.level_dimensions = [
             (int(l.datasets[0].TotalPixelMatrixColumns), int(l.datasets[0].TotalPixelMatrixRows))
-            for l in wsi.levels
+            for l in self._levels
         ]
-        # wsidicom levels expose pyramid index as `level.level` (downsample = 2**level.level)
-        self.level_downsamples = [float(2 ** int(l.level)) for l in wsi.levels]
-        self.properties = {}  # optionally populate if you want
+
+        # Downsample relative to base, consistent with pyramid indices
+        self.level_downsamples = [float(2 ** int(p)) for p in self._pyr_levels]
+
+        # Populate OpenSlide-like properties (used by _estimate_level0_mpp)
+        props = {}
+        mpp_x = mpp_y = None
+
+        # Prefer wsidicom metadata (pixel_spacing is typically mm/px)
+        try:
+            md = getattr(wsi, "metadata", None)
+            img_md = getattr(md, "image", None) if md is not None else None
+            px = getattr(img_md, "pixel_spacing", None) if img_md is not None else None
+            if px is not None:
+                if isinstance(px, (tuple, list)) and len(px) == 2:
+                    mm_y, mm_x = float(px[0]), float(px[1])
+                elif hasattr(px, "row") and hasattr(px, "column"):
+                    mm_y, mm_x = float(px.row), float(px.column)
+                elif hasattr(px, "y") and hasattr(px, "x"):
+                    mm_y, mm_x = float(px.y), float(px.x)
+                else:
+                    mm_y = float(getattr(px, "y", getattr(px, "row", None)))
+                    mm_x = float(getattr(px, "x", getattr(px, "column", None)))
+                if mm_x and mm_y:
+                    mpp_x, mpp_y = mm_x * 1000.0, mm_y * 1000.0  # mm -> um
+        except Exception:
+            pass
+
+        # Fallback: raw dataset PixelSpacing (mm/px)
+        if mpp_x is None or mpp_y is None:
+            try:
+                ds0 = self._levels[0].datasets[0]
+                ps = getattr(ds0, "PixelSpacing", None)
+                if ps is not None and len(ps) == 2:
+                    mpp_y, mpp_x = float(ps[0]) * 1000.0, float(ps[1]) * 1000.0
+            except Exception:
+                pass
+
+        if mpp_x is not None and mpp_y is not None:
+            props["openslide.mpp-x"] = str(mpp_x)
+            props["openslide.mpp-y"] = str(mpp_y)
+
+        # Optional: objective lens power if present
+        try:
+            ds0 = self._levels[0].datasets[0]
+            obj = getattr(ds0, "ObjectiveLensPower", None)
+            if obj is not None:
+                obj = float(obj)
+                if obj > 0:
+                    props["openslide.objective-power"] = str(obj)
+        except Exception:
+            pass
+
+        self.properties = props
 
     def read_region(self, location, level, size):
-        x0, y0 = location  # OpenSlide style: level-0 coords
+        # OpenSlide semantics: location is in level-0 coordinates
+        x0, y0 = location
         ds = float(self.level_downsamples[level])
-        # wsidicom expects coords relative to the chosen level
         xl, yl = int(round(x0 / ds)), int(round(y0 / ds))
-        img = self._wsi.read_region((xl, yl), level, size)
-        return img  # PIL.Image
+
+        # Translate OpenSlide available-level index -> WsiDicom pyramid index
+        pyr_level = int(self._pyr_levels[level])
+        return self._wsi.read_region((xl, yl), pyr_level, size)
 
     def close(self):
         self._wsi.close()
@@ -705,10 +770,22 @@ def preprocess_wsi(
     _progress("grandqc", 1, 1)
 
     # Step 4: Compute tile size in level-0 pixels
-    level0_mpp = thumbnail.level0_mpp or 0.5
-    objective_power = thumbnail.objective_power or 40.0
-    target_mpp = (objective_power / target_mag) * level0_mpp
-    tile_size_lvl0 = max(1, int(round(tile_size_px * target_mpp / level0_mpp)))
+    level0_mpp = thumbnail.level0_mpp
+    if level0_mpp is None and extra_metadata:
+        level0_mpp = extra_metadata.get("level0_mpp") or extra_metadata.get("base_mpp_um")
+    if level0_mpp is None:
+        level0_mpp = 0.5  # safe default
+
+    objective_power = thumbnail.objective_power
+    if objective_power is None and level0_mpp:
+        objective_power = 10.0 / float(level0_mpp)  # consistent fallback
+
+    if objective_power is not None:
+        target_mpp = (float(objective_power) / float(target_mag)) * float(level0_mpp)
+    else:
+        target_mpp = 10.0 / float(target_mag)
+
+    tile_size_lvl0 = max(1, int(round(tile_size_px * (float(target_mpp) / float(level0_mpp)))))
 
     # Step 5: Generate tile grid with QC scores
     def _tile_progress(current: int, total: int):

@@ -646,11 +646,14 @@ def write_conch_features_zarr_from_preprocess(
         stride_px_lv0=int(tile_size_lvl0),
     )
 
-    import openslide
-
     slide = None
     try:
-        slide = openslide.OpenSlide(str(wsi_path))
+        try:
+            from pipeline.preprocess_qc import _open_wsi
+        except Exception:
+            from preprocess_qc import _open_wsi
+
+        slide = _open_wsi(Path(wsi_path))
         for r0 in range(0, h, int(block_size)):
             for c0 in range(0, w, int(block_size)):
                 bh = min(int(block_size), h - r0)
@@ -865,13 +868,24 @@ def write_conch_features_zarr_for_rois(
             "encoded_now": 0,
         }
 
-    import openslide
     from PIL import Image
+    try:
+        from pipeline.preprocess_qc import _open_wsi
+    except Exception:
+        from preprocess_qc import _open_wsi
+
+    # Threaded prefetch is safer with OpenSlide than wsidicom; disable for DICOM dirs.
+    try:
+        _is_dicom_input = Path(wsi_path).is_dir()
+    except Exception:
+        _is_dicom_input = False
+    if _is_dicom_input:
+        prefetch_batches = 0
 
     if int(prefetch_batches) <= 0:
         slide = None
         try:
-            slide = openslide.OpenSlide(str(wsi_path))
+            slide = _open_wsi(Path(wsi_path))
             feats = encoder.encode_from_slide(
                 slide=slide,
                 tile_coords=tile_coords,
@@ -899,7 +913,7 @@ def write_conch_features_zarr_for_rois(
         def _reader_worker() -> None:
             slide = None
             try:
-                slide = openslide.OpenSlide(str(wsi_path))
+                slide = _open_wsi(Path(wsi_path))
                 level_ds = float(slide.level_downsamples[0])
                 read_size = max(1, int(round(tile_size_lvl0 / level_ds)))
                 batch_tiles: List[torch.Tensor] = []
