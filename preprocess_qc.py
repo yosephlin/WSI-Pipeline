@@ -352,7 +352,7 @@ def _load_grandqc_model(
     device: str = "cuda",
 ) -> Tuple[Any, Callable]:
     """Load GrandQC model and preprocessing function."""
-    from pipeline.artifact_mask import load_grandqc_artifact_model
+    from artifact_mask import load_grandqc_artifact_model
     return load_grandqc_artifact_model(model_path, device=device)
 
 
@@ -365,7 +365,7 @@ def _run_grandqc_on_slide(
     batch_size: int = GRANDQC_BATCH_SIZE,
 ) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
     """Run GrandQC artifact segmentation on slide within tissue regions."""
-    from pipeline.artifact_mask import segment_grandqc_artifacts_slide
+    from artifact_mask import segment_grandqc_artifacts_slide
 
     return segment_grandqc_artifacts_slide(
         slide,

@@ -95,7 +95,7 @@ def load_conch_model(
         return module
 
     try:
-        from pipeline.conchv1_5 import create_model_from_pretrained
+        from conchv1_5 import create_model_from_pretrained
     except Exception as exc:
         try:
             module = _load_local_conch_module()
@@ -631,7 +631,7 @@ def write_conch_features_zarr_from_preprocess(
     coords_valid = (x0_grid >= 0) & (y0_grid >= 0)
     encode_mask = coords_valid & (tissue >= float(min_tissue_encode))
 
-    from pipeline.zarr_slide_writer import ZarrSlideWriter
+    from zarr_slide_writer import ZarrSlideWriter
 
     out_dir = Path(output_dir) if output_dir is not None else preprocess_dir
     encoder = CONCHEncoder(device=device, batch_size=int(batch_size))
@@ -648,10 +648,7 @@ def write_conch_features_zarr_from_preprocess(
 
     slide = None
     try:
-        try:
-            from pipeline.preprocess_qc import _open_wsi
-        except Exception:
-            from preprocess_qc import _open_wsi
+        from preprocess_qc import _open_wsi
 
         slide = _open_wsi(Path(wsi_path))
         for r0 in range(0, h, int(block_size)):
@@ -869,10 +866,7 @@ def write_conch_features_zarr_for_rois(
         }
 
     from PIL import Image
-    try:
-        from pipeline.preprocess_qc import _open_wsi
-    except Exception:
-        from preprocess_qc import _open_wsi
+    from preprocess_qc import _open_wsi
 
     # Threaded prefetch is safer with OpenSlide than wsidicom; disable for DICOM dirs.
     try:

@@ -5,9 +5,9 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from pipeline.dataloader import SlideDataset, create_dataloader
-from pipeline.roi_sampler import ROICandidate, sample_candidate_rois_selective
-from pipeline.train import run_training
+from dataloader import SlideDataset, create_dataloader
+from roi_sampler import ROICandidate, sample_candidate_rois_selective
+from train import run_training
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -237,8 +237,8 @@ def main() -> None:
     if args.stage in ("preprocess", "all"):
         if args.manifest:
             import pandas as pd
-            from pipeline.preprocess_qc import preprocess_wsi
-            from pipeline.idc_materialize import materialize_series_to_tmp
+            from preprocess_qc import preprocess_wsi
+            from idc_materialize import materialize_series_to_tmp
 
             df = pd.read_parquet(args.manifest)
             out_root = output_root

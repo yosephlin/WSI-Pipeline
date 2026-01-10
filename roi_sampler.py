@@ -1459,7 +1459,7 @@ def sample_candidate_rois_selective(
     if len(result.passed_candidates) == 0:
         return result
 
-    from pipeline.conch_encoder import write_conch_features_zarr_for_rois
+    from conch_encoder import write_conch_features_zarr_for_rois
 
     features_path, encode_stats = write_conch_features_zarr_for_rois(
         preprocess_dir,
