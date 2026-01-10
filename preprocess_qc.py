@@ -85,8 +85,12 @@ class _WsiDicomAsOpenSlide:
             for l in self._levels
         ]
 
-        # Downsample relative to base, consistent with pyramid indices
-        self.level_downsamples = [float(2 ** int(p)) for p in self._pyr_levels]
+        # Downsample relative to base, computed from level dimensions (not assumed power-of-two).
+        w0, _h0 = self.level_dimensions[0]
+        self.level_downsamples = [
+            (float(w0) / float(w)) if w > 0 else 1.0
+            for (w, _h) in self.level_dimensions
+        ]
 
         # Populate OpenSlide-like properties (used by _estimate_level0_mpp)
         props = {}
