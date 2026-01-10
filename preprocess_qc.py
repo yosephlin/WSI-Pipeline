@@ -146,12 +146,45 @@ class _WsiDicomAsOpenSlide:
     def read_region(self, location, level, size):
         # OpenSlide semantics: location is in level-0 coordinates
         x0, y0 = location
-        ds = float(self.level_downsamples[level])
-        xl, yl = int(round(x0 / ds)), int(round(y0 / ds))
+        w0, h0 = self.level_dimensions[0]
+        w_level, h_level = self.level_dimensions[level]
+        ds_x = float(w0) / float(w_level) if w_level > 0 else 1.0
+        ds_y = float(h0) / float(h_level) if h_level > 0 else 1.0
+        xl, yl = int(round(x0 / ds_x)), int(round(y0 / ds_y))
 
         # Translate OpenSlide available-level index -> WsiDicom pyramid index
         pyr_level = int(self._pyr_levels[level])
-        return self._wsi.read_region((xl, yl), pyr_level, size)
+        w_req, h_req = (int(size[0]), int(size[1]))
+        if w_req <= 0 or h_req <= 0:
+            raise ValueError(f"Invalid read size: {size}")
+
+        x1 = xl + w_req
+        y1 = yl + h_req
+        if xl >= 0 and yl >= 0 and x1 <= w_level and y1 <= h_level:
+            return self._wsi.read_region((xl, yl), pyr_level, (w_req, h_req))
+
+        read_x0 = max(0, xl)
+        read_y0 = max(0, yl)
+        read_x1 = min(w_level, x1)
+        read_y1 = min(h_level, y1)
+        if read_x1 <= read_x0 or read_y1 <= read_y0:
+            try:
+                from PIL import Image
+            except Exception as e:  # pragma: no cover
+                raise ImportError("Pillow is required for padding out-of-bounds reads.") from e
+            return Image.new("RGB", (w_req, h_req))
+
+        read_w = int(read_x1 - read_x0)
+        read_h = int(read_y1 - read_y0)
+        patch = self._wsi.read_region((read_x0, read_y0), pyr_level, (read_w, read_h))
+
+        try:
+            from PIL import Image
+        except Exception as e:  # pragma: no cover
+            raise ImportError("Pillow is required for padding out-of-bounds reads.") from e
+        canvas = Image.new(patch.mode, (w_req, h_req))
+        canvas.paste(patch, (int(read_x0 - xl), int(read_y0 - yl)))
+        return canvas
 
     def close(self):
         self._wsi.close()
