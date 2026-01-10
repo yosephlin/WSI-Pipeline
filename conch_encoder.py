@@ -32,6 +32,7 @@ import torch
 
 __all__ = [
     "CONCHEncoder",
+    "get_shared_conch_encoder",
     "extract_tile_features",
     "load_conch_model",
     "write_conch_features_zarr_from_preprocess",
@@ -342,6 +343,35 @@ class CONCHEncoder:
 
 
 # ---------------------------------------------------------------------------
+# Shared encoder cache
+# ---------------------------------------------------------------------------
+
+
+_ENCODER_CACHE: Dict[Tuple[Optional[str], str], CONCHEncoder] = {}
+
+
+def get_shared_conch_encoder(
+    *,
+    model_path: Optional[Union[str, Path]] = None,
+    device: str = "cuda",
+    batch_size: int = 32,
+) -> CONCHEncoder:
+    """
+    Return a cached CONCHEncoder for the current process.
+
+    Reuses the model across slides to avoid repeated loads.
+    """
+    key = (str(model_path) if model_path is not None else None, str(device))
+    encoder = _ENCODER_CACHE.get(key)
+    if encoder is None:
+        encoder = CONCHEncoder(model_path=model_path, device=device, batch_size=int(batch_size))
+        _ENCODER_CACHE[key] = encoder
+    else:
+        encoder.batch_size = int(batch_size)
+    return encoder
+
+
+# ---------------------------------------------------------------------------
 # Convenience Functions
 # ---------------------------------------------------------------------------
 
@@ -371,7 +401,7 @@ def extract_tile_features(
         >>> features = extract_tile_features(tiles, device="cuda")
         >>> print(features.shape)  # (100, 768)
     """
-    encoder = CONCHEncoder(
+    encoder = get_shared_conch_encoder(
         model_path=model_path,
         device=device,
         batch_size=batch_size,
@@ -574,6 +604,8 @@ def write_conch_features_zarr_from_preprocess(
     block_size: int = 16,
     batch_size: int = 32,
     device: str = "cuda",
+    encoder: Optional["CONCHEncoder"] = None,
+    model_path: Optional[Union[str, Path]] = None,
     consolidate_metadata: bool = True,
     overwrite: bool = True,
 ) -> Path:
@@ -634,7 +666,14 @@ def write_conch_features_zarr_from_preprocess(
     from zarr_slide_writer import ZarrSlideWriter
 
     out_dir = Path(output_dir) if output_dir is not None else preprocess_dir
-    encoder = CONCHEncoder(device=device, batch_size=int(batch_size))
+    if encoder is None:
+        encoder = get_shared_conch_encoder(
+            model_path=model_path,
+            device=device,
+            batch_size=int(batch_size),
+        )
+    else:
+        encoder.batch_size = int(batch_size)
 
     writer = ZarrSlideWriter(out_dir, store_name=str(zarr_name), overwrite=bool(overwrite))
     writer.open(
@@ -729,6 +768,8 @@ def write_conch_features_zarr_for_rois(
     overwrite: bool = False,
     consolidate_metadata: bool = True,
     prefetch_batches: int = 2,
+    encoder: Optional["CONCHEncoder"] = None,
+    model_path: Optional[Union[str, Path]] = None,
 ) -> Tuple[Path, Dict[str, int]]:
     """
     Encode only tiles needed for QC-passed ROI candidates and write to features.zarr.
@@ -841,7 +882,14 @@ def write_conch_features_zarr_for_rois(
     if not wsi_path.exists():
         raise FileNotFoundError(f"WSI not found: {wsi_path}")
 
-    encoder = CONCHEncoder(device=device, batch_size=int(batch_size))
+    if encoder is None:
+        encoder = get_shared_conch_encoder(
+            model_path=model_path,
+            device=device,
+            batch_size=int(batch_size),
+        )
+    else:
+        encoder.batch_size = int(batch_size)
     root, features_arr, tissue_arr, artifact_arr, valid_arr, _created = _open_or_create_features_store(
         zarr_path,
         grid_shape=(h, w),

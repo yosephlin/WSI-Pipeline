@@ -237,7 +237,7 @@ def _apply_augmentations(
         if posterize_noise_std > 0:
             out = out + rng.normal(0.0, float(posterize_noise_std), size=out.shape).astype(out.dtype, copy=False)
     out = np.where(mask[..., None], out, 0.0)
-    return out, mask
+    return np.ascontiguousarray(out), np.ascontiguousarray(mask)
 
 
 def _make_mask(valid_mask: np.ndarray, rng: np.random.Generator, ratio: float) -> np.ndarray:
