@@ -21,6 +21,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -51,6 +52,7 @@ MIN_TISSUE_FRAC = 0.5
 GRANDQC_INPUT_SIZE = 512
 GRANDQC_BATCH_SIZE = 4
 GRANDQC_MPP = 1.5
+ROI_MIN_VALID_FRAC = 0.5
 
 
 def _open_wsi(path: Path):
@@ -488,6 +490,62 @@ def _mask_fraction_in_bbox(
     return float(region.mean()) if region.size > 0 else 0.0
 
 
+def _roi_window_has_tissue(
+    tissue_mask: np.ndarray,
+    thumbnail: "Thumbnail",
+    *,
+    tile_size_lvl0: int,
+    roi_size_tiles: int,
+    tile_min_tissue: float,
+    min_valid_frac: float,
+) -> bool:
+    tissue_bbox = _tissue_bbox(tissue_mask)
+    if tissue_bbox is None:
+        return False
+
+    W, H = thumbnail.slide_dimensions
+    scale_x, scale_y = thumbnail.scale_x, thumbnail.scale_y
+
+    tx0, ty0, tx1, ty1 = tissue_bbox
+    sx0 = max(0, int(tx0 / scale_x) - tile_size_lvl0)
+    sy0 = max(0, int(ty0 / scale_y) - tile_size_lvl0)
+    sx1 = min(W, int(tx1 / scale_x) + tile_size_lvl0)
+    sy1 = min(H, int(ty1 / scale_y) + tile_size_lvl0)
+
+    sx0 = (sx0 // tile_size_lvl0) * tile_size_lvl0
+    sy0 = (sy0 // tile_size_lvl0) * tile_size_lvl0
+
+    n_cols = max(1, (sx1 - sx0 + tile_size_lvl0 - 1) // tile_size_lvl0)
+    n_rows = max(1, (sy1 - sy0 + tile_size_lvl0 - 1) // tile_size_lvl0)
+
+    roi_size_tiles = int(roi_size_tiles)
+    if n_rows < roi_size_tiles or n_cols < roi_size_tiles:
+        return False
+
+    tissue_frac_grid = np.zeros((n_rows, n_cols), dtype=np.float32)
+    for i in range(n_rows):
+        for j in range(n_cols):
+            x0 = sx0 + j * tile_size_lvl0
+            y0 = sy0 + i * tile_size_lvl0
+            x1 = min(x0 + tile_size_lvl0, W)
+            y1 = min(y0 + tile_size_lvl0, H)
+            tissue_frac_grid[i, j] = _mask_fraction_in_bbox(
+                tissue_mask, x0, y0, x1, y1, scale_x, scale_y
+            )
+
+    valid_mask = tissue_frac_grid >= float(tile_min_tissue)
+    roi_area = int(roi_size_tiles * roi_size_tiles)
+    min_valid = int(math.ceil(float(min_valid_frac) * float(roi_area)))
+    if min_valid <= 0:
+        return bool(valid_mask.any())
+
+    valid_int = np.pad(valid_mask.astype(np.int32), ((1, 0), (1, 0)), mode="constant")
+    valid_int = valid_int.cumsum(axis=0).cumsum(axis=1)
+    r = roi_size_tiles
+    sums = valid_int[r:, r:] - valid_int[:-r, r:] - valid_int[r:, :-r] + valid_int[:-r, :-r]
+    return bool((sums >= min_valid).any())
+
+
 def _generate_tile_grid_with_qc(
     slide: Any,
     thumbnail: Thumbnail,
@@ -726,6 +784,9 @@ def preprocess_wsi(
     tile_size_px: int = TILE_SIZE_PX,
     target_mag: float = TARGET_MAG,
     min_tissue_frac: float = MIN_TISSUE_FRAC,
+    roi_size_tiles: Optional[int] = None,
+    roi_min_valid_frac: float = ROI_MIN_VALID_FRAC,
+    roi_tile_min_tissue: Optional[float] = None,
     grandqc_model_dir: Optional[Union[str, Path]] = None,
     grandqc_batch_size: int = GRANDQC_BATCH_SIZE,
     device: str = "cuda",
@@ -749,6 +810,9 @@ def preprocess_wsi(
         tile_size_px: Tile size at target magnification (default 512)
         target_mag: Target magnification (default 20x = 0.5 µm/px)
         min_tissue_frac: Minimum tissue fraction to accept tile (default 0.5)
+        roi_size_tiles: ROI size in tiles for early tissue sparsity check (optional)
+        roi_min_valid_frac: Minimum valid tile fraction for ROI viability check
+        roi_tile_min_tissue: Tile tissue threshold for ROI viability check (defaults to min_tissue_frac)
         grandqc_model_dir: Directory containing GrandQC .pth weights (optional)
         grandqc_batch_size: Batch size for GrandQC inference
         device: Device for GrandQC ("cuda" or "cpu")
@@ -817,23 +881,7 @@ def preprocess_wsi(
     tissue_mask = _otsu_tissue_mask(thumbnail.rgb)
     _progress("tissue_mask", 1, 1)
 
-    # Step 3: Run GrandQC artifact segmentation
-    _progress("grandqc", 0, 1)
-    grandqc_model_path = _resolve_grandqc_model_path(grandqc_model_dir)
-    if grandqc_model_path is not None and grandqc_model_path.exists():
-        model, preprocessing_fn = _load_grandqc_model(grandqc_model_path, device=device)
-        artifact_mask, _class_map, grandqc_meta = _run_grandqc_on_slide(
-            slide, tissue_mask, model, preprocessing_fn,
-            device=device, batch_size=grandqc_batch_size,
-        )
-        del _class_map  # Not needed, using artifact_mask only
-    else:
-        # Fallback: no artifact detection
-        artifact_mask = np.zeros_like(tissue_mask, dtype=bool)
-        grandqc_meta = {"enabled": False, "reason": "model_not_found"}
-    _progress("grandqc", 1, 1)
-
-    # Step 4: Compute tile size in level-0 pixels
+    # Step 3: Compute tile size in level-0 pixels
     level0_mpp = thumbnail.level0_mpp
     if level0_mpp is None and extra_metadata:
         level0_mpp = extra_metadata.get("level0_mpp") or extra_metadata.get("base_mpp_um")
@@ -850,6 +898,48 @@ def preprocess_wsi(
         target_mpp = 10.0 / float(target_mag)
 
     tile_size_lvl0 = max(1, int(round(tile_size_px * (float(target_mpp) / float(level0_mpp)))))
+
+    # Step 4: Run GrandQC artifact segmentation (skip if tissue is too sparse for ROI size)
+    _progress("grandqc", 0, 1)
+    skip_grandqc = False
+    sparse_meta: Dict[str, Any] = {}
+    if roi_size_tiles is not None:
+        tile_min = float(roi_tile_min_tissue) if roi_tile_min_tissue is not None else float(min_tissue_frac)
+        viable = _roi_window_has_tissue(
+            tissue_mask,
+            thumbnail,
+            tile_size_lvl0=int(tile_size_lvl0),
+            roi_size_tiles=int(roi_size_tiles),
+            tile_min_tissue=float(tile_min),
+            min_valid_frac=float(roi_min_valid_frac),
+        )
+        sparse_meta = {
+            "roi_size_tiles": int(roi_size_tiles),
+            "roi_min_valid_frac": float(roi_min_valid_frac),
+            "roi_tile_min_tissue": float(tile_min),
+            "roi_viable": bool(viable),
+        }
+        if not viable:
+            skip_grandqc = True
+
+    if not skip_grandqc:
+        grandqc_model_path = _resolve_grandqc_model_path(grandqc_model_dir)
+        if grandqc_model_path is not None and grandqc_model_path.exists():
+            model, preprocessing_fn = _load_grandqc_model(grandqc_model_path, device=device)
+            artifact_mask, _class_map, grandqc_meta = _run_grandqc_on_slide(
+                slide, tissue_mask, model, preprocessing_fn,
+                device=device, batch_size=grandqc_batch_size,
+            )
+            del _class_map  # Not needed, using artifact_mask only
+        else:
+            artifact_mask = np.zeros_like(tissue_mask, dtype=bool)
+            grandqc_meta = {"enabled": False, "reason": "model_not_found"}
+    else:
+        artifact_mask = np.zeros_like(tissue_mask, dtype=bool)
+        grandqc_meta = {"enabled": False, "reason": "sparse_tissue"}
+    if sparse_meta:
+        grandqc_meta["roi_check"] = sparse_meta
+    _progress("grandqc", 1, 1)
 
     # Step 5: Generate tile grid with QC scores
     def _tile_progress(current: int, total: int):
@@ -958,6 +1048,24 @@ if __name__ == "__main__":
     parser.add_argument("--target-mag", type=float, default=TARGET_MAG, help="Target magnification (default 20x)")
     parser.add_argument("--min-tissue", type=float, default=MIN_TISSUE_FRAC, help="Minimum tissue fraction")
     parser.add_argument(
+        "--roi-size-tiles",
+        type=int,
+        default=None,
+        help="ROI size in tiles for early tissue sparsity check (optional)",
+    )
+    parser.add_argument(
+        "--roi-min-valid-frac",
+        type=float,
+        default=ROI_MIN_VALID_FRAC,
+        help="Minimum valid tile fraction for ROI sparsity check",
+    )
+    parser.add_argument(
+        "--roi-tile-min-tissue",
+        type=float,
+        default=None,
+        help="Tile tissue threshold for ROI sparsity check (defaults to --min-tissue)",
+    )
+    parser.add_argument(
         "--grandqc-model-dir",
         type=str,
         default=None,
@@ -984,6 +1092,9 @@ if __name__ == "__main__":
         tile_size_px=args.tile_size,
         target_mag=args.target_mag,
         min_tissue_frac=args.min_tissue,
+        roi_size_tiles=args.roi_size_tiles,
+        roi_min_valid_frac=args.roi_min_valid_frac,
+        roi_tile_min_tissue=args.roi_tile_min_tissue,
         grandqc_model_dir=args.grandqc_model_dir,
         device=args.device,
         progress_callback=progress,
