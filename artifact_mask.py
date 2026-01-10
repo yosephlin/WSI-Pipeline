@@ -76,9 +76,63 @@ def _estimate_level0_mpp(slide: Any) -> Optional[float]:
             candidates.append(float(v))
         except Exception:
             continue
-    if not candidates:
-        return None
-    return float(sum(candidates) / len(candidates))
+    if candidates:
+        return float(sum(candidates) / len(candidates))
+
+    try:
+        v = getattr(slide, "level0_mpp", None)
+        if v is not None:
+            f = float(v)
+            if f > 0:
+                return f
+    except Exception:
+        pass
+
+    def _mpp_from_wsidicom(obj: Any) -> Optional[float]:
+        if obj is None:
+            return None
+        mm_x = mm_y = None
+        try:
+            md = getattr(obj, "metadata", None)
+            img_md = getattr(md, "image", None) if md is not None else None
+            px = getattr(img_md, "pixel_spacing", None) if img_md is not None else None
+            if px is not None:
+                if isinstance(px, (tuple, list)) and len(px) == 2:
+                    mm_y, mm_x = float(px[0]), float(px[1])
+                elif hasattr(px, "row") and hasattr(px, "column"):
+                    mm_y, mm_x = float(px.row), float(px.column)
+                elif hasattr(px, "y") and hasattr(px, "x"):
+                    mm_y, mm_x = float(px.y), float(px.x)
+                else:
+                    mm_y = float(getattr(px, "y", getattr(px, "row", None)))
+                    mm_x = float(getattr(px, "x", getattr(px, "column", None)))
+        except Exception:
+            mm_x = mm_y = None
+
+        if mm_x is None or mm_y is None:
+            try:
+                levels = getattr(obj, "levels", None)
+                if levels:
+                    ds0 = levels[0].datasets[0]
+                    ps = getattr(ds0, "PixelSpacing", None)
+                    if ps is None:
+                        ps = getattr(ds0, "ImagedPixelSpacing", None)
+                    if ps is not None and len(ps) == 2:
+                        mm_y, mm_x = float(ps[0]), float(ps[1])
+            except Exception:
+                mm_x = mm_y = None
+
+        if mm_x is None or mm_y is None:
+            return None
+        if mm_x <= 0 or mm_y <= 0:
+            return None
+        return float((mm_x + mm_y) * 1000.0 / 2.0)
+
+    for obj in (slide, getattr(slide, "_wsi", None)):
+        mpp = _mpp_from_wsidicom(obj)
+        if mpp is not None:
+            return mpp
+    return None
 
 
 def _install_timm_legacy_aliases() -> None:
