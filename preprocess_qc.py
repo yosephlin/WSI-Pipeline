@@ -53,9 +53,6 @@ GRANDQC_BATCH_SIZE = 4
 GRANDQC_MPP = 1.5
 
 
-def _repo_root() -> Path:
-    return Path(__file__).resolve().parents[1]
-
 def _open_wsi(path: Path):
     # OpenSlide for classic formats; WsiDicom for DICOM WSI folders
     if path.is_dir() or path.suffix.lower() == ".dcm":
@@ -154,9 +151,6 @@ class _WsiDicomAsOpenSlide:
 
     def close(self):
         self._wsi.close()
-
-DEFAULT_GRANDQC_MODEL = _repo_root() / "models" / "GrandQC_MPP15.pth"
-
 
 def _require_cv2() -> None:
     if _CV2_IMPORT_ERROR is not None:
@@ -377,6 +371,23 @@ def _run_grandqc_on_slide(
         patch_size=GRANDQC_INPUT_SIZE,
         batch_size=batch_size,
     )
+
+
+def _resolve_grandqc_model_path(model_dir: Optional[Union[str, Path]]) -> Optional[Path]:
+    if model_dir is None:
+        return None
+    path = Path(model_dir)
+    if path.is_file():
+        return path
+    if not path.exists():
+        return None
+    candidate = path / "GrandQC_MPP15.pth"
+    if candidate.exists():
+        return candidate
+    matches = sorted(path.glob("*.pth"))
+    if len(matches) == 1:
+        return matches[0]
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -678,7 +689,7 @@ def preprocess_wsi(
     tile_size_px: int = TILE_SIZE_PX,
     target_mag: float = TARGET_MAG,
     min_tissue_frac: float = MIN_TISSUE_FRAC,
-    grandqc_model_path: Optional[Path] = None,
+    grandqc_model_dir: Optional[Union[str, Path]] = None,
     grandqc_batch_size: int = GRANDQC_BATCH_SIZE,
     device: str = "cuda",
     progress_callback: Optional[Callable[[str, int, int], None]] = None,
@@ -701,7 +712,7 @@ def preprocess_wsi(
         tile_size_px: Tile size at target magnification (default 512)
         target_mag: Target magnification (default 20x = 0.5 µm/px)
         min_tissue_frac: Minimum tissue fraction to accept tile (default 0.5)
-        grandqc_model_path: Path to GrandQC model (default: auto-detect)
+        grandqc_model_dir: Directory containing GrandQC .pth weights (optional)
         grandqc_batch_size: Batch size for GrandQC inference
         device: Device for GrandQC ("cuda" or "cpu")
         progress_callback: Optional callback(stage, current, total) for progress
@@ -753,10 +764,8 @@ def preprocess_wsi(
 
     # Step 3: Run GrandQC artifact segmentation
     _progress("grandqc", 0, 1)
-    if grandqc_model_path is None:
-        grandqc_model_path = DEFAULT_GRANDQC_MODEL
-
-    if grandqc_model_path.exists():
+    grandqc_model_path = _resolve_grandqc_model_path(grandqc_model_dir)
+    if grandqc_model_path is not None and grandqc_model_path.exists():
         model, preprocessing_fn = _load_grandqc_model(grandqc_model_path, device=device)
         artifact_mask, _class_map, grandqc_meta = _run_grandqc_on_slide(
             slide, tissue_mask, model, preprocessing_fn,
@@ -893,6 +902,12 @@ if __name__ == "__main__":
     parser.add_argument("--tile-size", type=int, default=TILE_SIZE_PX, help="Tile size (default 512)")
     parser.add_argument("--target-mag", type=float, default=TARGET_MAG, help="Target magnification (default 20x)")
     parser.add_argument("--min-tissue", type=float, default=MIN_TISSUE_FRAC, help="Minimum tissue fraction")
+    parser.add_argument(
+        "--grandqc-model-dir",
+        type=str,
+        default=None,
+        help="Directory containing GrandQC .pth weights (e.g., GrandQC_MPP15.pth).",
+    )
     parser.add_argument("--device", type=str, default="cuda", help="Device for GrandQC (cuda/cpu)")
 
     args = parser.parse_args()
@@ -914,6 +929,7 @@ if __name__ == "__main__":
         tile_size_px=args.tile_size,
         target_mag=args.target_mag,
         min_tissue_frac=args.min_tissue,
+        grandqc_model_dir=args.grandqc_model_dir,
         device=args.device,
         progress_callback=progress,
     )
