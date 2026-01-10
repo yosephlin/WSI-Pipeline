@@ -747,6 +747,24 @@ def preprocess_wsi(
 
     slide = _open_wsi(wsi_path)
     slide_id = wsi_path.stem
+    if extra_metadata:
+        mpp_val = extra_metadata.get("level0_mpp") or extra_metadata.get("base_mpp_um")
+        try:
+            mpp_val = float(mpp_val)
+        except Exception:
+            mpp_val = None
+        if mpp_val is not None and mpp_val > 0:
+            props = getattr(slide, "properties", None)
+            if not isinstance(props, dict):
+                props = dict(props) if props is not None else {}
+                try:
+                    slide.properties = props
+                except Exception:
+                    props = getattr(slide, "properties", {}) or {}
+            if "openslide.mpp-x" not in props:
+                props["openslide.mpp-x"] = str(mpp_val)
+            if "openslide.mpp-y" not in props:
+                props["openslide.mpp-y"] = str(mpp_val)
 
     def _progress(stage: str, current: int, total: int):
         if progress_callback:

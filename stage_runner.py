@@ -258,6 +258,17 @@ def main() -> None:
                         value = getattr(r, key)
                         if not pd.isna(value):
                             extra_metadata[key] = value
+                base_mm = getattr(r, "base_PixelSpacing_mm", None)
+                if base_mm is not None and not pd.isna(base_mm):
+                    try:
+                        base_mm = float(base_mm)
+                    except Exception:
+                        base_mm = None
+                if base_mm is not None and base_mm > 0:
+                    base_mpp_um = base_mm * 1000.0
+                    extra_metadata["base_PixelSpacing_mm"] = base_mm
+                    extra_metadata["base_mpp_um"] = base_mpp_um
+                    extra_metadata["level0_mpp"] = base_mpp_um
 
                 with materialize_series_to_tmp(series_uid, tmp_root) as series_path:
                     # series_path is a directory; preprocess_qc now supports it
