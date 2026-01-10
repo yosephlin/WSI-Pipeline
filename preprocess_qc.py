@@ -155,7 +155,7 @@ class _WsiDicomAsOpenSlide:
     def close(self):
         self._wsi.close()
 
-DEFAULT_GRANDQC_MODEL = _repo_root() / "pipeline" / "models" / "GrandQC_MPP15.pth"
+DEFAULT_GRANDQC_MODEL = _repo_root() / "models" / "GrandQC_MPP15.pth"
 
 
 def _require_cv2() -> None:
