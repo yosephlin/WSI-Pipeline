@@ -249,6 +249,87 @@ def apply_quality_filters(
 
     return out.reset_index(drop=True)
 
+def add_density_proxy(df: pd.DataFrame, prefer_level: str = "x20_if_available") -> pd.DataFrame:
+    """
+    Adds:
+      - area_mpix: megapixels of chosen level (x20 if available else base)
+      - mb_per_mpix: series_size_MB / area_mpix  (higher ~= more content)
+    """
+    out = df.copy()
+
+    # pick dims: x20 if requested and present, else base
+    has_x20 = out.get("has_x20_level", pd.Series([0]*len(out))).astype(int).eq(1)
+    use_x20 = has_x20 if prefer_level == "x20_if_available" else pd.Series(False, index=out.index)
+
+    cols = np.where(use_x20, out["x20_cols"].astype(float), out["base_cols"].astype(float))
+    rows = np.where(use_x20, out["x20_rows"].astype(float), out["base_rows"].astype(float))
+
+    area_mpix = (cols * rows) / 1e6
+    out["area_mpix"] = area_mpix
+
+    out["mb_per_mpix"] = out["series_size_MB"].astype(float) / out["area_mpix"].astype(float)
+    out["mb_per_mpix"] = out["mb_per_mpix"].replace([np.inf, -np.inf], np.nan)
+
+    return out
+
+
+def apply_density_filter(
+    df: pd.DataFrame,
+    mode: str,
+    keep_top_quantile: float,
+    min_mb_per_mpix: Optional[float],
+    group_by: str,
+) -> pd.DataFrame:
+    """
+    mode:
+      - "none": no filtering
+      - "global_topq": keep top quantile globally by mb_per_mpix
+      - "group_topq": keep top quantile within each group (recommended)
+      - "threshold": keep mb_per_mpix >= min_mb_per_mpix
+    """
+    if mode == "none":
+        return df
+
+    out = df.copy()
+    out = out[out["mb_per_mpix"].notna() & out["area_mpix"].notna()].reset_index(drop=True)
+    if len(out) == 0:
+        return out
+
+    # optional hard floor first (useful to prevent extreme sparsity even before quantiles)
+    if min_mb_per_mpix is not None:
+        out = out[out["mb_per_mpix"] >= float(min_mb_per_mpix)].reset_index(drop=True)
+        if len(out) == 0:
+            return out
+
+    if mode == "threshold":
+        return out
+
+    keep_top_quantile = float(keep_top_quantile)
+    keep_top_quantile = max(0.0, min(1.0, keep_top_quantile))
+    cut = 1.0 - keep_top_quantile  # keep densest X% => rank_pct >= 1 - X
+
+    if mode == "global_topq":
+        out["__rank_pct"] = out["mb_per_mpix"].rank(pct=True, ascending=True)
+        out = out[out["__rank_pct"] >= cut].drop(columns=["__rank_pct"]).reset_index(drop=True)
+        return out
+
+    if mode == "group_topq":
+        # group_by can be "site", "site_codec", "collection_site_codec", etc.
+        group_cols = []
+        if group_by == "site":
+            group_cols = ["primaryAnatomicStructure_CodeMeaning"]
+        elif group_by == "site_codec":
+            group_cols = ["primaryAnatomicStructure_CodeMeaning", "base_TransferSyntaxUID"]
+        elif group_by == "collection_site_codec":
+            group_cols = ["collection_id_norm", "primaryAnatomicStructure_CodeMeaning", "base_TransferSyntaxUID"]
+        else:
+            raise ValueError(f"Unknown density_group_by={group_by}")
+
+        out["__rank_pct"] = out.groupby(group_cols)["mb_per_mpix"].rank(pct=True, ascending=True)
+        out = out[out["__rank_pct"] >= cut].drop(columns=["__rank_pct"]).reset_index(drop=True)
+        return out
+
+    raise ValueError(f"Unknown density_filter_mode={mode}")
 
 def make_group_key(df: pd.DataFrame, balanced_by: str) -> pd.Series:
     if balanced_by == "collection":
@@ -406,6 +487,22 @@ def main():
     ap.add_argument("--allow_transfer_syntax", type=str, default="",
                     help="Comma-separated TransferSyntaxUID allowlist (optional).")
 
+    # density proxy (fast sparsity filter; zero-download)
+    ap.add_argument("--density_filter", type=str, default="none",
+                    choices=["none", "global_topq", "group_topq", "threshold"],
+                    help="Fast sparsity gate using mb_per_mpix = series_size_MB / megapixels. "
+                        "Use group_topq to avoid organ/codec bias.")
+    ap.add_argument("--density_keep_top_quantile", type=float, default=1.0,
+                    help="For *_topq modes: keep densest X fraction (e.g. 0.4 keeps top 40%).")
+    ap.add_argument("--density_min_mb_per_mpix", type=float, default=None,
+                    help="Optional hard floor for mb_per_mpix before quantile filtering (e.g. 0.02).")
+    ap.add_argument("--density_group_by", type=str, default="site_codec",
+                    choices=["site", "site_codec", "collection_site_codec"],
+                    help="Grouping for group_topq ranking (recommended: site_codec).")
+    ap.add_argument("--density_prefer_level", type=str, default="x20_if_available",
+                    choices=["x20_if_available", "base_only"],
+                    help="Which pixel matrix to use for megapixels when computing mb_per_mpix.")
+
     # selection constraints
     ap.add_argument("--one_slide_per_patient", action="store_true",
                     help="Enforce at most one slide per PatientID globally (strong leakage control).")
@@ -452,6 +549,18 @@ def main():
     )
     summarize(df_q, "quality_filtered")
 
+    print("\nApplying density proxy filter (fast sparsity gate)...")
+    df_q = add_density_proxy(df_q, prefer_level=args.density_prefer_level)
+    df_q = apply_density_filter(
+        df_q,
+        mode=args.density_filter,
+        keep_top_quantile=args.density_keep_top_quantile,
+        min_mb_per_mpix=args.density_min_mb_per_mpix,
+        group_by=args.density_group_by,
+    )
+    summarize(df_q, "density_filtered")
+
+
     print("\nBalanced sampling...")
     gkey = make_group_key(df_q, args.balanced_by)
     df_bal = balanced_sample_unique_patients(
@@ -462,6 +571,11 @@ def main():
         one_slide_per_patient=args.one_slide_per_patient,
     )
     summarize(df_bal, f"balanced({args.balanced_by})")
+    
+    if len(df_bal) == 0:
+        print("\nNo slides after filtering/balancing. Try loosening filters or lowering n_per_group.")
+        out_prefix = os.path.join(args.out_dir, args.out_name)
+        write_manifest(df_bal, out_prefix)
 
     # write main manifest
     out_prefix = os.path.join(args.out_dir, args.out_name)
