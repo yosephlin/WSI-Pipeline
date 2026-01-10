@@ -1418,8 +1418,8 @@ def sample_candidate_rois_selective(
     seed: Optional[int] = None,
 ) -> ROISamplerResult:
     """
-    ROI-first sampling: gate ROIs using QC only, encode tiles for passed ROIs,
-    then compute embeddings and run k-DPP selection.
+    ROI-first sampling: gate ROIs using QC only, then compute embeddings from
+    pre-encoded features and run k-DPP selection.
     """
     preprocess_dir = Path(preprocess_dir)
     if qc_zarr_path is None:
@@ -1459,20 +1459,11 @@ def sample_candidate_rois_selective(
     if len(result.passed_candidates) == 0:
         return result
 
-    from conch_encoder import write_conch_features_zarr_for_rois
-
-    features_path, encode_stats = write_conch_features_zarr_for_rois(
-        preprocess_dir,
-        result.passed_candidates,
-        roi_size=int(roi_size),
-        output_dir=features_path.parent,
-        zarr_name=Path(features_path).name,
-        tile_min_tissue_for_valid=tile_min_tissue_for_valid,
-        device=device,
-        batch_size=int(batch_size),
-        overwrite=bool(overwrite_features),
-        consolidate_metadata=False,
-    )
+    if not features_path.exists():
+        raise FileNotFoundError(
+            f"Missing features store: {features_path}. "
+            "Pre-encode the full grid before ROI sampling."
+        )
 
     sampler.features_path = Path(features_path)
     sampler._load_features()
@@ -1500,7 +1491,10 @@ def sample_candidate_rois_selective(
         result.selected_candidates = selected
 
     result.metadata["selection"] = selection_meta
-    result.metadata["encoding"] = encode_stats
+    result.metadata["encoding"] = {
+        "mode": "preencoded",
+        "encoded_now": 0,
+    }
     result.metadata["features_path"] = str(features_path)
 
     return result

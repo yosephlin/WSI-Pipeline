@@ -772,14 +772,6 @@ def write_conch_features_zarr_for_rois(
     if tile_size_lvl0 <= 0:
         raise ValueError("preprocess_meta.json missing tile_size_lvl0.")
 
-    if wsi_path is None:
-        wsi_path = meta.get("wsi_path")
-    if not wsi_path:
-        raise ValueError("Provide --wsi or ensure preprocess_meta.json has wsi_path.")
-    wsi_path = Path(wsi_path)
-    if not wsi_path.exists():
-        raise FileNotFoundError(f"WSI not found: {wsi_path}")
-
     try:
         import zarr
     except ImportError as e:
@@ -819,6 +811,35 @@ def write_conch_features_zarr_for_rois(
 
     out_dir = Path(output_dir) if output_dir is not None else preprocess_dir
     zarr_path = out_dir / zarr_name
+
+    existing_valid = None
+    if zarr_path.exists():
+        try:
+            root = zarr.open(str(zarr_path), mode="r")
+            if "valid_mask" in root:
+                existing_valid = np.asarray(root["valid_mask"][:], dtype=bool)
+        except Exception:
+            existing_valid = None
+
+    if existing_valid is not None:
+        needed_mask &= ~existing_valid
+        to_encode = int(np.count_nonzero(needed_mask))
+        if to_encode == 0:
+            if consolidate_metadata:
+                zarr.consolidate_metadata(str(zarr_path))
+            return zarr_path, {
+                "requested_tiles": requested_tiles,
+                "already_encoded": requested_tiles,
+                "encoded_now": 0,
+            }
+
+    if wsi_path is None:
+        wsi_path = meta.get("wsi_path")
+    if not wsi_path:
+        raise ValueError("Provide --wsi or ensure preprocess_meta.json has wsi_path.")
+    wsi_path = Path(wsi_path)
+    if not wsi_path.exists():
+        raise FileNotFoundError(f"WSI not found: {wsi_path}")
 
     encoder = CONCHEncoder(device=device, batch_size=int(batch_size))
     root, features_arr, tissue_arr, artifact_arr, valid_arr, _created = _open_or_create_features_store(

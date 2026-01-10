@@ -790,6 +790,9 @@ def preprocess_wsi(
     grandqc_model_dir: Optional[Union[str, Path]] = None,
     grandqc_batch_size: int = GRANDQC_BATCH_SIZE,
     device: str = "cuda",
+    auto_encode_features: bool = True,
+    encode_min_tissue: float = 0.0,
+    encode_batch_size: int = 32,
     progress_callback: Optional[Callable[[str, int, int], None]] = None,
     extra_metadata: Optional[Dict[str, Any]] = None,
 ) -> PreprocessResult:
@@ -803,6 +806,7 @@ def preprocess_wsi(
       4. Generate tile grid constrained to tissue bounding box
       5. Apply QC filters (tissue fraction)
       6. Save Zarr arrays (fast window queries) + Parquet manifest (analytics)
+      7. Optionally pre-encode full-grid features (for training)
 
     Args:
         wsi_path: Path to WSI file (.svs, .ndpi, .tiff, etc.)
@@ -815,7 +819,10 @@ def preprocess_wsi(
         roi_tile_min_tissue: Tile tissue threshold for ROI viability check (defaults to min_tissue_frac)
         grandqc_model_dir: Directory containing GrandQC .pth weights (optional)
         grandqc_batch_size: Batch size for GrandQC inference
-        device: Device for GrandQC ("cuda" or "cpu")
+        device: Device for GrandQC / encoding ("cuda" or "cpu")
+        auto_encode_features: If True, pre-encode features.zarr after preprocessing
+        encode_min_tissue: Min tissue fraction for pre-encoding (0.0 encodes all tiles)
+        encode_batch_size: Batch size for CONCH encoding
         progress_callback: Optional callback(stage, current, total) for progress
         extra_metadata: Optional dict merged into preprocess_meta.json
 
@@ -1016,6 +1023,20 @@ def preprocess_wsi(
     with open(meta_path, "w") as f:
         json.dump(metadata, f, indent=2, default=str)
 
+    if auto_encode_features:
+        from conch_encoder import write_conch_features_zarr_from_preprocess
+
+        features_path = write_conch_features_zarr_from_preprocess(
+            output_dir,
+            min_tissue_encode=float(encode_min_tissue),
+            batch_size=int(encode_batch_size),
+            device=str(device),
+            overwrite=True,
+        )
+        metadata["features_path"] = str(features_path)
+        with open(meta_path, "w") as f:
+            json.dump(metadata, f, indent=2, default=str)
+
     return PreprocessResult(
         wsi_path=wsi_path,
         output_dir=output_dir,
@@ -1072,6 +1093,23 @@ if __name__ == "__main__":
         help="Directory containing GrandQC .pth weights (e.g., GrandQC_MPP15.pth).",
     )
     parser.add_argument("--device", type=str, default="cuda", help="Device for GrandQC (cuda/cpu)")
+    parser.add_argument(
+        "--skip-encode-features",
+        action="store_true",
+        help="Skip pre-encoding features.zarr (default: encode).",
+    )
+    parser.add_argument(
+        "--encode-min-tissue",
+        type=float,
+        default=0.0,
+        help="Min tissue fraction for pre-encoding (0 encodes all tiles).",
+    )
+    parser.add_argument(
+        "--encode-batch-size",
+        type=int,
+        default=32,
+        help="Batch size for CONCH encoding.",
+    )
 
     args = parser.parse_args()
 
@@ -1097,6 +1135,9 @@ if __name__ == "__main__":
         roi_tile_min_tissue=args.roi_tile_min_tissue,
         grandqc_model_dir=args.grandqc_model_dir,
         device=args.device,
+        auto_encode_features=not args.skip_encode_features,
+        encode_min_tissue=args.encode_min_tissue,
+        encode_batch_size=args.encode_batch_size,
         progress_callback=progress,
     )
 

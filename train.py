@@ -496,8 +496,6 @@ def run_training(
     min_group_tiles_frac: float,
     max_artifact_frac_for_group: float,
     device: str,
-    encode_batch_size: int,
-    overwrite_features: bool,
     lr: float,
     weight_decay: float,
     warmup_frac: float,
@@ -583,9 +581,6 @@ def run_training(
                     min_group_tiles_frac=float(min_group_tiles_frac),
                     max_artifact_frac_for_group=float(max_artifact_frac_for_group),
                     k=2,
-                    device=str(device),
-                    batch_size=int(encode_batch_size),
-                    overwrite_features=bool(overwrite_features),
                     seed=seed,
                 )
 
@@ -642,30 +637,6 @@ def run_training(
             )
 
 
-def _preencode_full_grid(
-    preprocess_dirs: List[Path],
-    *,
-    min_tissue_encode: float,
-    encode_batch_size: int,
-    device: str,
-    overwrite_features: bool,
-) -> None:
-    from conch_encoder import write_conch_features_zarr_from_preprocess
-
-    for preprocess_dir in preprocess_dirs:
-        preprocess_dir = Path(preprocess_dir)
-        features_path = preprocess_dir / "features.zarr"
-        if features_path.exists() and not overwrite_features:
-            continue
-        write_conch_features_zarr_from_preprocess(
-            preprocess_dir,
-            min_tissue_encode=float(min_tissue_encode),
-            batch_size=int(encode_batch_size),
-            device=str(device),
-            overwrite=bool(overwrite_features),
-        )
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="ROI-first masked iBOT training loop.")
     parser.add_argument(
@@ -704,20 +675,7 @@ def main() -> None:
         default=0.25,
         help="Max artifact frac for group formation",
     )
-    parser.add_argument("--device", type=str, default="cuda", help="Device for encoding/training")
-    parser.add_argument("--encode-batch-size", type=int, default=32, help="Encoder batch size")
-    parser.add_argument("--overwrite-features", action="store_true", help="Overwrite features.zarr")
-    parser.add_argument(
-        "--preencode-full-grid",
-        action="store_true",
-        help="Pre-encode full tile grid for each slide before training.",
-    )
-    parser.add_argument(
-        "--preencode-min-tissue",
-        type=float,
-        default=0.0,
-        help="Min tissue fraction for pre-encoding (0 = encode all tiles).",
-    )
+    parser.add_argument("--device", type=str, default="cuda", help="Device for training")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
     parser.add_argument("--weight-decay", type=float, default=0.05, help="Weight decay")
     parser.add_argument("--warmup-frac", type=float, default=0.05, help="Warmup fraction for cosine LR")
@@ -753,15 +711,6 @@ def main() -> None:
     else:
         preprocess_dirs = list_preprocess_dirs(Path(args.preprocess_root))
 
-    if args.preencode_full_grid:
-        _preencode_full_grid(
-            preprocess_dirs,
-            min_tissue_encode=float(args.preencode_min_tissue),
-            encode_batch_size=int(args.encode_batch_size),
-            device=str(args.device),
-            overwrite_features=bool(args.overwrite_features),
-        )
-
     run_training(
         preprocess_dirs,
         epochs=int(args.epochs),
@@ -779,8 +728,6 @@ def main() -> None:
         min_group_tiles_frac=float(args.min_group_tiles_frac),
         max_artifact_frac_for_group=float(args.max_artifact_frac_for_group),
         device=str(args.device),
-        encode_batch_size=int(args.encode_batch_size),
-        overwrite_features=bool(args.overwrite_features),
         lr=float(args.lr),
         weight_decay=float(args.weight_decay),
         warmup_frac=float(args.warmup_frac),
